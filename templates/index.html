@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reconocimiento de Dígitos Escritos a Mano (Handwritted digits)</title>
+  <style>
+        * { box-sizing: border-box; }
+        body{font-family:Segoe UI, Arial, sans-serif; background:linear-gradient(135deg,#0f172a,#1e293b); color:white; margin:0;}
+        .container { max-width: 920px; margin: 32px auto; padding: 0 16px; }
+        h1{text-align:center; margin-bottom:25px; font-size:34px; color:#60a5fa; letter-spacing:1px;}
+        .tools{display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:15px; margin-bottom:20px;}
+        button{background:#2563eb; color:white; border:none; padding:10px 16px; border-radius:10px; cursor:pointer; transition:.25s;}
+        button:hover{background:#1d4ed8; transform:translateY(-2px);}
+        .toggle { display: inline-flex; align-items: center; gap: 6px; }
+        .stage { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+        #canvas{background:white; border:4px solid #3b82f6; border-radius:18px; box-shadow:0 10px 25px rgba(0,0,0,.35);}
+        .panel{background:#1e293b; border-radius:15px; padding:18px; box-shadow:0 10px 25px rgba(0,0,0,.35);}
+        .big{font-size:30px; text-align:center; font-weight:bold; margin-bottom:20px;}
+        .bars { display: grid; grid-template-columns: 24px 1fr 48px; gap: 6px 10px; align-items: center; }
+        .bar { background:#475569; height: 12px; border-radius: 6px; overflow: hidden; }
+        .bar > span { background:linear-gradient(90deg,#06b6d4,#3b82f6); display: block; height: 100%; width: 0%; transition: width 0.25s ease; }
+        .label { color: #8b949e; }
+        .value { text-align: right; font-variant-numeric: tabular-nums; }
+        .hint { color: #8b949e; margin-top: 12px; }
+        footer{margin-top:35px; text-align:center; color:#94a3b8; font-size:15px;}
+        @media (max-width: 720px) {
+        .stage { grid-template-columns: 1fr; }
+        }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Reconocimiento de dígitos manuscritos en tiempo real</h1>
+
+    <div class="tools">
+      <label>Tamaño del pincel: <input id="brush" type="range" min="6" max="40" value="24"></label>
+      <button id="clear">Limpiar pizarra</button>
+      <label class="toggle">
+        <input id="rt" type="checkbox" checked> Tiempo real
+      </label>
+      <button id="predictBtn">Predecir</button>
+    </div>
+
+    <h3>Dibuja un número</h3>
+    <div class="stage">
+      <canvas id="canvas" width="280" height="280"></canvas>
+      <div class="panel">
+        <h3>Probabilidad por clase</h3>
+        <div class="big">
+          Predicción: <span id="pred">-</span>
+        </div>
+        <div id="bars" class="bars"></div>
+      </div>
+    </div>
+
+    <p class="hint">Escribe un solo dígito del 0 al 9. Usa el botón de Limpiar pizarra para borrar el contenido.</p>
+  </div>
+
+  <footer style="text-align:center; margin-top:40px;">
+      Proyecto desarrollado con TensorFlow, Flask y HTML5 Canvas.
+  </footer>
+
+  <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const clearBtn = document.getElementById('clear');
+        const brush = document.getElementById('brush');
+        const rt = document.getElementById('rt');
+        const predictBtn = document.getElementById('predictBtn');
+        const predEl = document.getElementById('pred');
+        const barsEl = document.getElementById('bars');
+
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = Number(brush.value);
+
+        brush.addEventListener('input', () => { ctx.lineWidth = Number(brush.value); });
+
+        let drawing = false;
+        let last = null;
+
+        function posFromEvent(e) {
+        const rect = canvas.getBoundingClientRect();
+        const touch = e.touches && e.touches[0];
+        const clientX = touch ? touch.clientX : e.clientX;
+        const clientY = touch ? touch.clientY : e.clientY;
+        return {
+            x: (clientX - rect.left) * (canvas.width / rect.width),
+            y: (clientY - rect.top) * (canvas.height / rect.height)
+        };
+        }
+
+        function drawLine(a, b) {
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        }
+
+        function onDown(e) {
+        e.preventDefault();
+        drawing = true;
+        last = posFromEvent(e);
+        }
+
+        function onMove(e) {
+        if (!drawing) return;
+        const p = posFromEvent(e);
+        drawLine(last, p);
+        last = p;
+        debouncedPredict();
+        }
+
+        function onUp(e) {
+        drawing = false;
+        last = null;
+        debouncedPredict();
+        }
+
+        canvas.addEventListener('mousedown', onDown);
+        canvas.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        canvas.addEventListener('touchstart', onDown, { passive: false });
+        canvas.addEventListener('touchmove', onMove, { passive: false });
+        canvas.addEventListener('touchend', onUp);
+
+        clearBtn.addEventListener('click', () => {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#000';
+        setPrediction(null);
+        });
+
+        predictBtn.addEventListener('click', () => predict());
+
+        function setPrediction(res) {
+        if (!res) {
+            predEl.textContent = '-';
+            barsEl.innerHTML = '';
+            for (let i = 0; i < 10; i++) addBar(i, 0);
+            return;
+        }
+        predEl.textContent = String(res.prediction);
+        barsEl.innerHTML = '';
+        res.probabilities.forEach((p, i) => addBar(i, p));
+        }
+
+        function addBar(digit, p) {
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = digit;
+
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        const fill = document.createElement('span');
+        fill.style.width = Math.round(p * 100) + '%';
+        bar.appendChild(fill);
+
+        const value = document.createElement('div');
+        value.className = 'value';
+        value.textContent = (p * 100).toFixed(1) + '%';
+
+        barsEl.appendChild(label);
+        barsEl.appendChild(bar);
+        barsEl.appendChild(value);
+        }
+
+        setPrediction(null);
+
+        async function predict() {
+        try {
+            const dataURL = canvas.toDataURL('image/png');
+            const res = await fetch('/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataURL })
+            });
+            const json = await res.json();
+            if (json.error) throw new Error(json.error);
+            setPrediction(json);
+        } catch (err) {
+            console.error(err);
+        }
+        }
+
+        let t = null;
+        function debouncedPredict() {
+        if (!rt.checked) return;
+        clearTimeout(t);
+        t = setTimeout(predict, 250);
+        }
+  </script>
+</body>
+</html>
